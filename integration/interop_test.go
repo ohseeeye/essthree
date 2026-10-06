@@ -16,15 +16,16 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/ohseeeye/essthree/s3"
-	"github.com/ohseeeye/oci/ocilayout"
+	"github.com/ohseeeye/oci/ocisqlite"
 )
 
 func server(t *testing.T) *httptest.Server {
 	t.Helper()
-	r, err := ocilayout.New(t.TempDir(), nil)
+	r, err := ocisqlite.New(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = r.Close() })
 	h, err := s3.NewHandler(r, s3.Options{DevelopmentMode: true})
 	if err != nil {
 		t.Fatal(err)

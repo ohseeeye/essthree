@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/ohseeeye/oci"
-	"github.com/ohseeeye/oci/ocilayout"
+	"github.com/ohseeeye/oci/ocisqlite"
 )
 
 type crashRegistry struct {
@@ -36,10 +36,11 @@ func (r crashRegistry) PushManifest(ctx context.Context, repo string, raw []byte
 func TestCompletionProcessInterruption(t *testing.T) {
 	ctx, scope := context.Background(), Scope{Tenant: "local"}
 	if dir := os.Getenv("ESSTHREE_CRASH_TEST_DIR"); dir != "" {
-		reg, err := ocilayout.New(dir, nil)
+		reg, err := ocisqlite.New(dir, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer reg.Close()
 		fault := &crashRegistry{Registry: reg}
 		s, err := newOCIStore(fault, OCIOptions{})
 		if err != nil {
@@ -71,10 +72,11 @@ func TestCompletionProcessInterruption(t *testing.T) {
 			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 77 {
 				t.Fatalf("child: %v %s", err, raw)
 			}
-			reg, err := ocilayout.New(dir, nil)
+			reg, err := ocisqlite.New(dir, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer reg.Close()
 			s, err := newOCIStore(reg, OCIOptions{})
 			if err != nil {
 				t.Fatal(err)

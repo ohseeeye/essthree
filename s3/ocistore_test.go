@@ -3,7 +3,7 @@ package s3
 import (
 	"context"
 	"errors"
-	"github.com/ohseeeye/oci/ocilayout"
+	"github.com/ohseeeye/oci/ocisqlite"
 	"io"
 	"strings"
 	"testing"
@@ -13,10 +13,11 @@ type brokenReader struct{}
 
 func (brokenReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 func TestScopesAndInterruptedWrite(t *testing.T) {
-	r, err := ocilayout.New(t.TempDir(), nil)
+	r, err := ocisqlite.New(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = r.Close() })
 	s, err := newOCIStore(r, OCIOptions{})
 	if err != nil {
 		t.Fatal(err)

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/ohseeeye/essthree/s3"
-	"github.com/ohseeeye/oci/ocilayout"
+	"github.com/ohseeeye/oci/ocisqlite"
 )
 
 func main() {
@@ -23,9 +23,9 @@ func main() {
 		os.Exit(1)
 	}
 }
-func run() error {
+func run() (runErr error) {
 	addr := flag.String("listen", "127.0.0.1:9000", "HTTP listen address")
-	dir := flag.String("data", "./data", "OCI layout directory")
+	dir := flag.String("data", "./data", "SQLite metadata and blob storage directory")
 	dev := flag.Bool("dev", false, "explicitly disable authentication (local testing only)")
 	flag.Parse()
 	if !*dev {
@@ -43,10 +43,16 @@ func run() error {
 		return fmt.Errorf("data directory is already locked: %w", err)
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	registry, err := ocilayout.New(*dir, nil)
+	if _, err := os.Stat(filepath.Join(*dir, "index.json")); err == nil {
+		return fmt.Errorf("data directory %q contains an OCI layout; use a new -data directory for SQLite storage", *dir)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect data directory: %w", err)
+	}
+	registry, err := ocisqlite.New(*dir, nil)
 	if err != nil {
 		return err
 	}
+	defer func() { runErr = errors.Join(runErr, registry.Close()) }()
 	handler, err := s3.NewHandler(registry, s3.Options{DevelopmentMode: true, Logger: slog.Default()})
 	if err != nil {
 		return err
@@ -56,7 +62,7 @@ func run() error {
 	defer stop()
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
-	slog.Info("starting development S3 server", "address", *addr, "data", *dir, "authentication", "disabled")
+	slog.Info("starting development S3 server", "address", *addr, "data", *dir, "authentication", "disabled", "backend", "ocisqlite")
 	select {
 	case err := <-done:
 		if errors.Is(err, http.ErrServerClosed) {

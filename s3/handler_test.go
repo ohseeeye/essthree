@@ -14,15 +14,16 @@ import (
 	"testing"
 
 	"github.com/ohseeeye/essthree/s3"
-	"github.com/ohseeeye/oci/ocilayout"
+	"github.com/ohseeeye/oci/ocisqlite"
 )
 
 func open(t *testing.T, dir string) *httptest.Server {
 	t.Helper()
-	r, err := ocilayout.New(dir, nil)
+	r, err := ocisqlite.New(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = r.Close() })
 	h, err := s3.NewHandler(r, s3.Options{DevelopmentMode: true, MaxObjectSize: 1024})
 	if err != nil {
 		t.Fatal(err)

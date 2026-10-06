@@ -11,15 +11,20 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/ohseeeye/essthree/s3"
-	"github.com/ohseeeye/oci/ocilayout"
+	"github.com/ohseeeye/oci/ocisqlite"
 )
 
 func TestSDKKeyAndVersionPagination(t *testing.T) {
 	dir := t.TempDir()
-	reg, err := ocilayout.New(dir, nil)
+	reg, err := ocisqlite.New(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		if reg != nil {
+			_ = reg.Close()
+		}
+	}()
 	handler, err := s3.NewHandler(reg, s3.Options{DevelopmentMode: true})
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +75,10 @@ func TestSDKKeyAndVersionPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.Close()
-	reg, err = ocilayout.New(dir, nil)
+	if err := reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reg, err = ocisqlite.New(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

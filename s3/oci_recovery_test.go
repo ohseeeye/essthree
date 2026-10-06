@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/ohseeeye/oci"
-	"github.com/ohseeeye/oci/ocilayout"
+	"github.com/ohseeeye/oci/ocisqlite"
 )
 
 type failingRegistry struct {
@@ -54,10 +54,11 @@ func TestCompletionRecovery(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					ctx, scope := context.Background(), Scope{Tenant: "local"}
 					dir := t.TempDir()
-					reg, err := ocilayout.New(dir, nil)
+					reg, err := ocisqlite.New(dir, nil)
 					if err != nil {
 						t.Fatal(err)
 					}
+					defer reg.Close()
 					fault := &failingRegistry{Registry: reg, kind: kind, after: after}
 					s, err := newOCIStore(fault, OCIOptions{})
 					if err != nil {
@@ -94,10 +95,11 @@ func TestCompletionRecovery(t *testing.T) {
 					}
 					fault.fail = false
 					if reopen {
-						reg, err = ocilayout.New(dir, nil)
+						reg, err = ocisqlite.New(dir, nil)
 						if err != nil {
 							t.Fatal(err)
 						}
+						defer reg.Close()
 						s, err = newOCIStore(reg, OCIOptions{})
 						if err != nil {
 							t.Fatal(err)

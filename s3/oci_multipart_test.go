@@ -14,15 +14,16 @@ import (
 	"testing"
 
 	"github.com/ohseeeye/oci"
-	"github.com/ohseeeye/oci/ocilayout"
+	"github.com/ohseeeye/oci/ocisqlite"
 )
 
 func multipartFixture(t *testing.T) (*OCIStore, MultipartUpload) {
 	t.Helper()
-	r, err := ocilayout.New(t.TempDir(), nil)
+	r, err := ocisqlite.New(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = r.Close() })
 	s, err := newOCIStore(r, OCIOptions{})
 	if err != nil {
 		t.Fatal(err)
