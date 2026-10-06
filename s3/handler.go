@@ -71,6 +71,8 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, status int, code,
 func (h *Handler) storageError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, msg := 500, "InternalError", "An internal error occurred."
 	switch {
+	case errors.Is(err, ErrInvalidVersionMarker):
+		status, code, msg = 400, "InvalidArgument", "Invalid version listing marker."
 	case errors.Is(err, ErrNoBucket):
 		status, code, msg = 404, "NoSuchBucket", "The specified bucket does not exist."
 	case errors.Is(err, ErrNoKey):
@@ -217,6 +219,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			w.WriteHeader(204)
 		case http.MethodGet:
+			if _, ok := q["versions"]; ok {
+				h.listObjectVersions(w, r, scope, bucket, q)
+				return
+			}
 			if _, ok := q["uploads"]; ok {
 				h.listMultipartUploads(w, r, scope, bucket, q)
 				return
@@ -286,6 +292,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("ETag", fmt.Sprintf("%q", o.ETag))
+		if o.VersionID != "" {
+			w.Header().Set("x-amz-version-id", o.VersionID)
+		}
 		w.WriteHeader(200)
 	case http.MethodGet:
 		o, err := h.store.GetObject(r.Context(), scope, bucket, key)
@@ -332,6 +341,9 @@ func hasOperationQuery(q map[string][]string) bool {
 	return false
 }
 func objectHeaders(w http.ResponseWriter, o Object) {
+	if o.VersionID != "" {
+		w.Header().Set("x-amz-version-id", o.VersionID)
+	}
 	for k, v := range o.Headers {
 		w.Header().Set(k, v)
 	}
@@ -339,6 +351,9 @@ func objectHeaders(w http.ResponseWriter, o Object) {
 		w.Header().Set("x-amz-meta-"+k, v)
 	}
 	w.Header().Set("ETag", fmt.Sprintf("%q", o.ETag))
+	if o.VersionID != "" {
+		w.Header().Set("x-amz-version-id", o.VersionID)
+	}
 	w.Header().Set("Content-Length", fmt.Sprint(o.Size))
 	w.Header().Set("Last-Modified", o.Modified.UTC().Format(http.TimeFormat))
 }

@@ -20,6 +20,9 @@ func (s *OCIStore) writeBucket(ctx context.Context, scope Scope, name string) (o
 	if err != nil {
 		return b, err
 	}
+	if err := s.ensureIndex(ctx, b.Annotations[annotation+"repo"]); err != nil {
+		return b, err
+	}
 	return b, s.recoverUploads(ctx, b.Annotations[annotation+"repo"])
 }
 
@@ -43,6 +46,9 @@ func (s *OCIStore) recoverScope(ctx context.Context, scope Scope) error {
 		}
 		if tag != "bucket-"+hash(b.Annotations[annotation+"name"]) || b.Annotations[annotation+"kind"] != "bucket" || b.Annotations[annotation+"repo"] == "" {
 			return errors.New("invalid bucket recovery record")
+		}
+		if err := s.ensureIndex(ctx, b.Annotations[annotation+"repo"]); err != nil {
+			return err
 		}
 		if err := s.recoverUploads(ctx, b.Annotations[annotation+"repo"]); err != nil {
 			return err
@@ -136,23 +142,8 @@ func (s *OCIStore) finishCompletion(ctx context.Context, repo string, state oci.
 	if fmt.Sprintf("%x-%d", md5.Sum(partDigests), len(state.Layers)) != object.ETag {
 		return errors.New("completion ETag mismatch")
 	}
-	current, err := s.read(ctx, repo, "obj-"+hash(object.Key))
-	if err != nil && !absent(err) {
+	if err := s.commitCompletion(ctx, repo, state); err != nil {
 		return err
-	}
-	if err == nil && (current.Annotations[annotation+"key"] != object.Key || (current.Annotations[annotation+"kind"] != "object" && current.Annotations[annotation+"kind"] != "deleted-object")) {
-		return errors.New("invalid recovery destination record")
-	}
-	// Invalidate even on an uncertain publication result: the object might have
-	// changed before the registry returned an error.
-	delete(s.listCache, repo)
-	if current.Annotations[annotation+"commit-id"] != a[annotation+"commit-id"] {
-		if current.Annotations[annotation+"generation"] != a[annotation+"base-generation"] {
-			return errors.New("multipart recovery conflicts with a later object generation")
-		}
-		if err := s.publish(ctx, repo, "obj-"+hash(object.Key), "object", cloneStrings(a), state.Layers); err != nil {
-			return fmt.Errorf("publish multipart object: %w", err)
-		}
 	}
 	if err := s.publish(ctx, repo, "upload-"+hash(a[annotation+"upload-id"]), "completed-upload", cloneStrings(a), state.Layers); err != nil {
 		return fmt.Errorf("mark multipart upload complete: %w", err)

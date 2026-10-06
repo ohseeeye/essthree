@@ -46,7 +46,7 @@ func (h *Handler) listObjects(w http.ResponseWriter, r *http.Request, scope Scop
 		h.fail(w, r, e.status, e.code, e.message)
 		return
 	}
-	objects, err := h.store.ListObjects(r.Context(), scope, ListRequest{Bucket: bucket})
+	objects, err := h.store.ListObjects(r.Context(), scope, ListRequest{Bucket: bucket, Prefix: opts.prefix, Delimiter: opts.delimiter, After: opts.after, Limit: opts.maxKeys + 1})
 	if err != nil {
 		h.storageError(w, r, err)
 		return

@@ -47,7 +47,11 @@ func (s *OCIStore) multipart(ctx context.Context, scope Scope, bucket, key, uplo
 }
 
 func multipartInfo(bucket string, m oci.IndexOrManifest) (MultipartUpload, error) {
-	created, err := time.Parse(time.RFC3339Nano, m.Annotations[annotation+"created"])
+	createdValue := m.Annotations[annotation+"upload-created"]
+	if createdValue == "" {
+		createdValue = m.Annotations[annotation+"created"]
+	}
+	created, err := time.Parse(time.RFC3339Nano, createdValue)
 	if err != nil {
 		return MultipartUpload{}, err
 	}
@@ -266,14 +270,20 @@ func (s *OCIStore) CompleteMultipartUpload(ctx context.Context, scope Scope, p C
 	a[annotation+"upload-id"] = p.UploadID
 	a[annotation+"created"] = state.Annotations[annotation+"created"]
 	a[annotation+"commit-id"] = id()
-	current, err := s.read(ctx, repo, "obj-"+hash(p.Key))
-	if err != nil && !absent(err) {
+	root, err := s.readIndex(ctx, repo)
+	if err != nil {
 		return Object{}, err
 	}
-	if err == nil && (current.Annotations[annotation+"key"] != p.Key || (current.Annotations[annotation+"kind"] != "object" && current.Annotations[annotation+"kind"] != "deleted-object")) {
-		return Object{}, errors.New("invalid completion destination record")
+	current, err := s.findEntry(ctx, repo, root.objects, p.Key)
+	if err != nil && !errors.Is(err, ErrNoKey) {
+		return Object{}, err
 	}
 	a[annotation+"base-generation"] = current.Annotations[annotation+"generation"]
+	a[annotation+"created"] = a[annotation+"modified"]
+	if current.Annotations[annotation+"created"] != "" {
+		a[annotation+"created"] = current.Annotations[annotation+"created"]
+	}
+	a[annotation+"upload-created"] = state.Annotations[annotation+"created"]
 	// Freezing the selected descriptors makes all subsequent attempts use the
 	// same object generation, even if a publication succeeds but returns an error.
 	if err := s.publish(ctx, repo, "upload-"+hash(p.UploadID), "completing-upload", a, layers); err != nil {
@@ -315,7 +325,11 @@ func (s *OCIStore) ListMultipartUploads(ctx context.Context, scope Scope, p Mult
 			return nil, err
 		}
 		if err == nil && marker.Annotations[annotation+"upload-id"] == p.UploadIDMarker && marker.Annotations[annotation+"key"] == p.KeyMarker && marker.Annotations[annotation+"created"] != "" {
-			markerTime, err = time.Parse(time.RFC3339Nano, marker.Annotations[annotation+"created"])
+			createdValue := marker.Annotations[annotation+"upload-created"]
+			if createdValue == "" {
+				createdValue = marker.Annotations[annotation+"created"]
+			}
+			markerTime, err = time.Parse(time.RFC3339Nano, createdValue)
 			if err != nil {
 				return nil, err
 			}
@@ -413,9 +427,8 @@ func (s *OCIStore) CopyObject(ctx context.Context, scope Scope, p CopyRequest) (
 		headers, metadata = p.Destination.Headers, p.Destination.Metadata
 	}
 	a := objectAnnotations(p.Destination.Key, source.Size, source.ETag, time.Now(), headers, metadata)
-	if err := s.publish(ctx, destinationRepo, "obj-"+hash(p.Destination.Key), "object", a, layers); err != nil {
+	if err := s.putIndexedObject(ctx, destinationRepo, a, layers); err != nil {
 		return Object{}, fmt.Errorf("publish copied object: %w", err)
 	}
-	delete(s.listCache, destinationRepo)
 	return objectInfo(oci.IndexOrManifest{Annotations: a})
 }

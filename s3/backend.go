@@ -26,12 +26,13 @@ type Bucket struct {
 	Created time.Time
 }
 type Object struct {
-	Key      string
-	Size     int64
-	ETag     string
-	Modified time.Time
-	Headers  map[string]string
-	Metadata map[string]string
+	Key       string
+	VersionID string
+	Size      int64
+	ETag      string
+	Modified  time.Time
+	Headers   map[string]string
+	Metadata  map[string]string
 }
 type PutRequest struct {
 	Bucket, Key       string
@@ -82,11 +83,13 @@ type CompleteMultipartRequest struct {
 	MaxSize               int64
 }
 
-// ListRequest is normalized by the HTTP layer. The store returns all live
-// objects in S3 key order; S3's V1/V2 pagination and delimiter behavior stay
-// at the protocol boundary.
+// ListRequest is normalized by the HTTP layer. The store walks a committed
+// index snapshot in key order, returning one representative per common prefix
+// when a delimiter is set. The HTTP layer encodes V1/V2 responses and cursors.
 type ListRequest struct {
-	Bucket string
+	Bucket                   string
+	Prefix, Delimiter, After string
+	Limit                    int // zero means all entries; common prefixes count as one
 }
 
 // MultipartListRequest identifies the last upload returned by a listing.
@@ -109,6 +112,7 @@ type Backend interface {
 	HeadObject(context.Context, Scope, string, string) (Object, error)
 	DeleteObject(context.Context, Scope, string, string) error
 	ListObjects(context.Context, Scope, ListRequest) ([]Object, error)
+	ListObjectVersions(context.Context, Scope, VersionListRequest) ([]ObjectVersion, error)
 	CopyObject(context.Context, Scope, CopyRequest) (Object, error)
 	CreateMultipartUpload(context.Context, Scope, PutRequest) (MultipartUpload, error)
 	UploadPart(context.Context, Scope, UploadPartRequest, io.Reader) (Part, error)
@@ -116,4 +120,16 @@ type Backend interface {
 	ListMultipartUploads(context.Context, Scope, MultipartListRequest) ([]MultipartUpload, error)
 	CompleteMultipartUpload(context.Context, Scope, CompleteMultipartRequest) (Object, error)
 	AbortMultipartUpload(context.Context, Scope, string, string, string) error
+}
+
+// ObjectVersion is a retained object generation or deletion marker. A grouped
+// listing entry has CommonPrefix set and counts as one entry.
+type ObjectVersion struct {
+	Object
+	IsLatest, DeleteMarker bool
+	CommonPrefix           string
+}
+type VersionListRequest struct {
+	Bucket, Prefix, Delimiter, KeyMarker, VersionIDMarker string
+	Limit                                                 int
 }

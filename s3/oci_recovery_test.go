@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ohseeeye/oci"
 	"github.com/ohseeeye/oci/ocilayout"
@@ -36,7 +37,7 @@ func (r *failingRegistry) PushManifest(ctx context.Context, repo string, raw []b
 }
 
 func TestCompletionRecovery(t *testing.T) {
-	for _, kind := range []string{"completing-upload", "object", "completed-upload"} {
+	for _, kind := range []string{"completing-upload", "object", "key-index", "bucket-root", "completed-upload"} {
 		for _, after := range []bool{false, true} {
 			for _, reopen := range []bool{false, true} {
 				name := kind
@@ -85,7 +86,7 @@ func TestCompletionRecovery(t *testing.T) {
 					if _, err := s.CompleteMultipartUpload(ctx, scope, completion); err == nil {
 						t.Fatal("expected injected failure")
 					}
-					if (kind == "object" || kind == "completed-upload") && !after {
+					if (kind == "object" || kind == "key-index" || kind == "bucket-root" || kind == "completed-upload") && !after {
 						// A frozen upload blocks later writes while reconciliation fails.
 						if _, err := s.PutObject(ctx, scope, p, strings.NewReader("blocked")); err == nil {
 							t.Fatal("uncertain completion allowed a conflicting write")
@@ -152,7 +153,7 @@ func (r missingPartRegistry) ResolveBlob(context.Context, string, oci.Digest) (o
 }
 
 func TestRecoveryRejectsCorruptionAndLaterGeneration(t *testing.T) {
-	for _, problem := range []string{"missing-part", "bad-etag", "later-delete"} {
+	for _, problem := range []string{"missing-part", "bad-etag", "later-generation"} {
 		t.Run(problem, func(t *testing.T) {
 			s, u := multipartFixture(t)
 			ctx, scope := context.Background(), Scope{Tenant: "local"}
@@ -183,16 +184,16 @@ func TestRecoveryRejectsCorruptionAndLaterGeneration(t *testing.T) {
 				if err := s.publish(ctx, repo, "upload-"+hash(u.UploadID), "completing-upload", state.Annotations, state.Layers); err != nil {
 					t.Fatal(err)
 				}
-			case "later-delete":
-				// Simulate a conflicting generation written by an older implementation.
-				if err := s.publish(ctx, repo, "obj-"+hash("key"), "deleted-object", map[string]string{annotation + "key": "key"}, nil); err != nil {
+			case "later-generation":
+				// Simulate a rival commit bypassing this store's recovery guard.
+				if err := s.putIndexedObject(ctx, repo, objectAnnotations("key", part.Size, part.ETag, time.Now(), nil, nil), state.Layers); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if _, err := newOCIStore(reg, OCIOptions{}); err == nil {
 				t.Fatal("startup accepted unsafe completion")
 			}
-			if _, err := s.HeadObject(ctx, scope, "bucket", "key"); !errors.Is(err, ErrNoKey) {
+			if _, err := s.HeadObject(ctx, scope, "bucket", "key"); problem != "later-generation" && !errors.Is(err, ErrNoKey) {
 				t.Fatalf("recovery published unsafe object: %v", err)
 			}
 		})

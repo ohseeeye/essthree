@@ -40,7 +40,7 @@ func TestCompletionProcessInterruption(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		fault := crashRegistry{Registry: reg, kind: os.Getenv("ESSTHREE_CRASH_TEST_KIND")}
+		fault := &crashRegistry{Registry: reg}
 		s, err := newOCIStore(fault, OCIOptions{})
 		if err != nil {
 			t.Fatal(err)
@@ -56,12 +56,13 @@ func TestCompletionProcessInterruption(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		fault.kind = os.Getenv("ESSTHREE_CRASH_TEST_KIND")
 		if _, err := s.CompleteMultipartUpload(ctx, scope, CompleteMultipartRequest{Bucket: "bucket", Key: "key", UploadID: u.UploadID, Parts: []CompletedPart{{Number: 1, ETag: part.ETag}}, MaxSize: -1}); err != nil {
 			t.Fatal(err)
 		}
 		t.Fatal("child did not terminate at publication")
 	}
-	for _, kind := range []string{"completing-upload", "object", "completed-upload"} {
+	for _, kind := range []string{"completing-upload", "object", "key-index", "bucket-root", "completed-upload"} {
 		t.Run(kind, func(t *testing.T) {
 			dir := t.TempDir()
 			cmd := exec.Command(os.Args[0], "-test.run=^TestCompletionProcessInterruption$")

@@ -244,6 +244,9 @@ func (h *Handler) completeMultipartUpload(w http.ResponseWriter, r *http.Request
 		h.storageError(w, r, err)
 		return
 	}
+	if object.VersionID != "" {
+		w.Header().Set("x-amz-version-id", object.VersionID)
+	}
 	writeXML(w, struct {
 		XMLName  xml.Name `xml:"CompleteMultipartUploadResult"`
 		XMLNS    string   `xml:"xmlns,attr"`
@@ -303,6 +306,9 @@ func (h *Handler) copyObject(w http.ResponseWriter, r *http.Request, scope Scope
 	if err != nil {
 		h.storageError(w, r, err)
 		return
+	}
+	if object.VersionID != "" {
+		w.Header().Set("x-amz-version-id", object.VersionID)
 	}
 	writeXML(w, struct {
 		XMLName      xml.Name `xml:"CopyObjectResult"`

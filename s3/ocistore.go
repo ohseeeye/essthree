@@ -27,10 +27,14 @@ const emptyType = "application/vnd.oci.empty.v1+json"
 
 type OCIOptions struct{ Namespace string }
 type OCIStore struct {
-	registry  oci.Registry
-	namespace string
-	mu        sync.RWMutex
-	listCache map[string][]Object
+	registry                 oci.Registry
+	namespace                string
+	mu                       sync.RWMutex
+	indexVerified            map[string]bool
+	indexEntries, indexBytes int
+	nodeMu                   sync.Mutex
+	nodeCache                map[indexCacheKey]cachedIndexNode
+	nodeCacheBytes           int
 }
 
 var _ Backend = (*OCIStore)(nil)
@@ -45,7 +49,7 @@ func newOCIStore(registry oci.Registry, opts OCIOptions) (*OCIStore, error) {
 	if !safeName(opts.Namespace) {
 		return nil, errors.New("namespace must contain lowercase letters, digits or hyphens")
 	}
-	s := &OCIStore{registry: registry, namespace: opts.Namespace, listCache: make(map[string][]Object)}
+	s := &OCIStore{registry: registry, namespace: opts.Namespace, indexVerified: make(map[string]bool), indexEntries: defaultIndexEntries, indexBytes: defaultIndexBytes, nodeCache: make(map[indexCacheKey]cachedIndexNode)}
 	// The HTTP server currently has one trusted scope. Recover it before serving
 	// requests; other scopes are reconciled before mutations through writeBucket.
 	if err := s.recoverScope(context.Background(), Scope{Tenant: "local"}); err != nil {
@@ -74,12 +78,7 @@ func (s *OCIStore) read(ctx context.Context, repo, tag string) (oci.IndexOrManif
 	if err != nil {
 		return oci.IndexOrManifest{}, err
 	}
-	defer r.Close()
-	var m oci.IndexOrManifest
-	if r.Descriptor().Size > 4<<20 {
-		return m, errors.New("manifest exceeds limit")
-	}
-	err = json.NewDecoder(io.LimitReader(r, (4<<20)+1)).Decode(&m)
+	m, err := decodeStoredManifest(r)
 	if err == nil && m.Annotations[annotation+"schema"] != "1" {
 		err = errors.New("unsupported storage schema")
 	}
@@ -88,11 +87,11 @@ func (s *OCIStore) read(ctx context.Context, repo, tag string) (oci.IndexOrManif
 func absent(err error) bool {
 	return errors.Is(err, oci.ErrNameUnknown) || errors.Is(err, oci.ErrManifestUnknown)
 }
-func (s *OCIStore) publish(ctx context.Context, repo, tag, kind string, a map[string]string, layers []oci.Descriptor) error {
+func (s *OCIStore) pushArtifact(ctx context.Context, repo, kind string, a map[string]string, layers []oci.Descriptor, params *oci.PushManifestParameters) (oci.Descriptor, error) {
 	empty := []byte("{}")
 	d := oci.Descriptor{MediaType: emptyType, Digest: ocidigest.FromBytes(empty), Size: 2}
 	if _, err := s.registry.PushBlob(ctx, repo, d, bytes.NewReader(empty)); err != nil {
-		return err
+		return oci.Descriptor{}, err
 	}
 	a[annotation+"schema"] = "1"
 	a[annotation+"kind"] = kind
@@ -103,11 +102,18 @@ func (s *OCIStore) publish(ctx context.Context, repo, tag, kind string, a map[st
 	m := oci.IndexOrManifest{SchemaVersion: 2, MediaType: oci.MediaTypeImageManifest, ArtifactType: "application/vnd.essthree." + kind + ".v1", Config: &d, Layers: layers, Annotations: a}
 	raw, err := json.Marshal(m)
 	if err != nil {
-		return err
+		return oci.Descriptor{}, err
 	}
-	_, err = s.registry.PushManifest(ctx, repo, raw, oci.MediaTypeImageManifest, &oci.PushManifestParameters{Tags: []string{tag}})
+	if len(raw) > manifestLimit {
+		return oci.Descriptor{}, errors.New("manifest exceeds limit")
+	}
+	return s.registry.PushManifest(ctx, repo, raw, oci.MediaTypeImageManifest, params)
+}
+func (s *OCIStore) publish(ctx context.Context, repo, tag, kind string, a map[string]string, layers []oci.Descriptor) error {
+	_, err := s.pushArtifact(ctx, repo, kind, a, layers, &oci.PushManifestParameters{Tags: []string{tag}})
 	return err
 }
+
 func (s *OCIStore) bucket(ctx context.Context, scope Scope, name string) (oci.IndexOrManifest, error) {
 	m, err := s.read(ctx, s.catalog(scope), "bucket-"+hash(name))
 	if absent(err) {
@@ -136,6 +142,9 @@ func (s *OCIStore) CreateBucket(ctx context.Context, scope Scope, name string) e
 		return err
 	}
 	repo := s.namespace + "/t-" + hash(scope.Tenant) + "/b-" + strings.ToLower(id())
+	if err := s.initializeIndex(ctx, repo); err != nil {
+		return err
+	}
 	return s.publish(ctx, s.catalog(scope), "bucket-"+hash(name), "bucket", map[string]string{annotation + "name": name, annotation + "repo": repo, annotation + "created": time.Now().UTC().Format(time.RFC3339Nano)}, nil)
 }
 func (s *OCIStore) ListBuckets(ctx context.Context, scope Scope) ([]Bucket, error) {
@@ -186,38 +195,32 @@ func (s *OCIStore) DeleteBucket(ctx context.Context, scope Scope, name string) e
 		return err
 	}
 	repo := b.Annotations[annotation+"repo"]
+	objects, err := s.listIndexedObjects(ctx, repo, ListRequest{Limit: 1})
+	if err != nil {
+		return err
+	}
+	if len(objects) > 0 {
+		return ErrNotEmpty
+	}
 	for tag, err := range s.registry.Tags(ctx, repo, nil) {
-		if errors.Is(err, oci.ErrNameUnknown) {
-			break
-		}
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(tag, "upload-") {
-			m, err := s.read(ctx, repo, tag)
-			if err != nil {
-				return err
-			}
-			if m.Annotations[annotation+"kind"] == "multipart-upload" {
-				return ErrNotEmpty
-			}
-			continue
-		}
-		if !strings.HasPrefix(tag, "obj-") {
+		if !strings.HasPrefix(tag, "upload-") {
 			continue
 		}
 		m, err := s.read(ctx, repo, tag)
 		if err != nil {
 			return err
 		}
-		if m.Annotations[annotation+"kind"] != "deleted-object" {
+		if m.Annotations[annotation+"kind"] == "multipart-upload" {
 			return ErrNotEmpty
 		}
 	}
 	if err := s.publish(ctx, s.catalog(scope), "bucket-"+hash(name), "deleted-bucket", map[string]string{annotation + "name": name}, nil); err != nil {
 		return err
 	}
-	delete(s.listCache, repo)
+	delete(s.indexVerified, repo)
 	return nil
 }
 func objectInfo(m oci.IndexOrManifest) (Object, error) {
@@ -230,7 +233,7 @@ func objectInfo(m oci.IndexOrManifest) (Object, error) {
 	if err != nil {
 		return Object{}, err
 	}
-	o := Object{Key: a[annotation+"key"], Size: n, ETag: a[annotation+"etag"], Modified: t, Headers: map[string]string{}, Metadata: map[string]string{}}
+	o := Object{Key: a[annotation+"key"], Size: n, ETag: a[annotation+"etag"], Modified: t, VersionID: a[annotation+"version-id"], Headers: map[string]string{}, Metadata: map[string]string{}}
 	for k, v := range a {
 		if strings.HasPrefix(k, annotation+"header.") {
 			o.Headers[strings.TrimPrefix(k, annotation+"header.")] = v
@@ -247,23 +250,8 @@ func (s *OCIStore) object(ctx context.Context, scope Scope, bucket, key string) 
 		return "", oci.IndexOrManifest{}, err
 	}
 	repo := b.Annotations[annotation+"repo"]
-	m, err := s.read(ctx, repo, "obj-"+hash(key))
-	if absent(err) {
-		err = ErrNoKey
-	}
-	if err != nil {
-		return repo, m, err
-	}
-	if m.Annotations[annotation+"key"] != key {
-		return repo, m, errors.New("object key mismatch")
-	}
-	if m.Annotations[annotation+"kind"] == "deleted-object" {
-		return repo, m, ErrNoKey
-	}
-	if m.Annotations[annotation+"kind"] != "object" {
-		return repo, m, errors.New("invalid object record")
-	}
-	return repo, m, nil
+	_, m, err := s.indexedObject(ctx, repo, key)
+	return repo, m, err
 }
 func (s *OCIStore) HeadObject(ctx context.Context, scope Scope, bucket, key string) (Object, error) {
 	s.mu.RLock()
@@ -275,59 +263,15 @@ func (s *OCIStore) HeadObject(ctx context.Context, scope Scope, bucket, key stri
 	return objectInfo(m)
 }
 
-// ListObjects returns a sorted snapshot of the bucket's live objects. The
-// cache is internal to the OCI adapter because it owns both OCI mutations and
-// cache invalidation. A process restart or cache miss rebuilds it by scanning
-// current object tags and their manifest annotations.
+// ListObjects traverses the authoritative ordered tree at one root generation.
 func (s *OCIStore) ListObjects(ctx context.Context, scope Scope, request ListRequest) ([]Object, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	bucket, err := s.bucket(ctx, scope, request.Bucket)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, err := s.bucket(ctx, scope, request.Bucket)
 	if err != nil {
 		return nil, err
 	}
-	repo := bucket.Annotations[annotation+"repo"]
-	if cached, ok := s.listCache[repo]; ok {
-		return append([]Object(nil), cached...), nil
-	}
-
-	objects := make([]Object, 0)
-	for tag, err := range s.registry.Tags(ctx, repo, nil) {
-		if errors.Is(err, oci.ErrNameUnknown) {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		if !strings.HasPrefix(tag, "obj-") {
-			continue
-		}
-
-		manifest, err := s.read(ctx, repo, tag)
-		if err != nil {
-			return nil, err
-		}
-		key := manifest.Annotations[annotation+"key"]
-		if tag != "obj-"+hash(key) {
-			return nil, errors.New("object tag key mismatch")
-		}
-		if manifest.Annotations[annotation+"kind"] == "deleted-object" {
-			continue
-		}
-		if manifest.Annotations[annotation+"kind"] != "object" {
-			return nil, errors.New("invalid object record")
-		}
-		object, err := objectInfo(manifest)
-		if err != nil {
-			return nil, err
-		}
-		objects = append(objects, object)
-	}
-
-	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
-	s.listCache[repo] = objects
-	return append([]Object(nil), objects...), nil
+	return s.listIndexedObjects(ctx, b.Annotations[annotation+"repo"], request)
 }
 func (s *OCIStore) GetObject(ctx context.Context, scope Scope, bucket, key string) (ObjectReader, error) {
 	s.mu.RLock()
@@ -464,10 +408,9 @@ func (s *OCIStore) PutObject(ctx context.Context, scope Scope, p PutRequest, r i
 	if current.Annotations[annotation+"repo"] != repo {
 		return Object{}, ErrNoBucket
 	}
-	if err = s.publish(ctx, repo, "obj-"+hash(p.Key), "object", a, []oci.Descriptor{d}); err != nil {
+	if err = s.putIndexedObject(ctx, repo, a, []oci.Descriptor{d}); err != nil {
 		return Object{}, fmt.Errorf("publish object: %w", err)
 	}
-	delete(s.listCache, repo)
 	return objectInfo(oci.IndexOrManifest{Annotations: a})
 }
 
@@ -494,9 +437,5 @@ func (s *OCIStore) DeleteObject(ctx context.Context, scope Scope, bucket, key st
 		return err
 	}
 	repo := b.Annotations[annotation+"repo"]
-	if err := s.publish(ctx, repo, "obj-"+hash(key), "deleted-object", map[string]string{annotation + "key": key}, nil); err != nil {
-		return err
-	}
-	delete(s.listCache, repo)
-	return nil
+	return s.deleteIndexedObject(ctx, repo, key)
 }

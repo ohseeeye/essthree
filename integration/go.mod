@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.5
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.2
 	github.com/ohseeeye/essthree v0.0.0
-	github.com/ohseeeye/oci v0.0.2
+	github.com/ohseeeye/oci v0.0.5
 )
 
 require (
