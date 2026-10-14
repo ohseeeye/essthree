@@ -323,16 +323,15 @@ for both the root and integration modules on pull requests. Pushes to `main`,
 including merged PRs, rerun those checks before publishing the Dockerfile as a
 multiarchitecture image for `linux/amd64` and `linux/arm64`.
 
-Configure these under **Settings → Secrets and variables → Actions**:
+Releases publish to `ohseeeye/essthree` on Docker Hub. Configure these under
+**Settings → Secrets and variables → Actions**:
 
 | Kind | Name | Value |
 | --- | --- | --- |
-| Repository variable | `DOCKERHUB_IMAGE` | Docker Hub repository without a tag, such as `your-account/essthree`. |
 | Repository secret | `DOCKERHUB_USERNAME` | Docker Hub login name. |
 | Repository secret | `DOCKERHUB_TOKEN` | Docker Hub access token with push access to that repository. |
 
-Publishing is skipped until `DOCKERHUB_IMAGE` is set. Once configured, successful
-releases publish `latest` and `sha-<full Git commit SHA>` tags. PR checks do not
+Successful releases publish only the `ohseeeye/essthree:latest` tag. PR checks do not
 use Docker Hub credentials. After configuring credentials, you can also run
 **Release** manually from the Actions tab with `main` selected. The release workflow uses Docker's
 [Buildx action](https://github.com/docker/setup-buildx-action) on its temporary
