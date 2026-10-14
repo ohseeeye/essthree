@@ -7,8 +7,8 @@ with `ocisqlite` as the default persistent backend.
 The goal is a standalone Go binary that makes common S3 workflows easy to test:
 create a bucket, upload and download objects, browse keys, and perform multipart
 uploads. It targets one process, one data directory, and one local owner, with a
-small number of buckets and objects. The current server implements a selected
-subset of S3 and requires an explicit development mode with authentication disabled.
+small number of buckets and objects. The server implements a selected subset of
+S3 with configurable SigV4 authentication or an explicit unauthenticated development mode.
 
 ## Quick start
 
@@ -44,9 +44,11 @@ go build -o essthree .
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `-dev` | `false` | Required for the current prototype; accepts requests without authenticating credentials or verifying signatures. |
+| `-dev` | `false` | Accepts requests without authenticating credentials or verifying signatures. Cannot be combined with configured credentials. |
 | `-listen` | `127.0.0.1:9000` | HTTP listening address. |
 | `-data` | `./data` | Directory for SQLite metadata, shared blobs, and in-progress uploads. |
+| `-region` | `us-east-1` | Required SigV4 signing region. Bucket location configuration still supports only `us-east-1`. |
+| `-require-signed-payload` | `false` | Rejects `UNSIGNED-PAYLOAD`; requires a SHA-256 payload hash. |
 
 Run one server per data directory. The binary holds a directory lock to prevent
 another writer from opening the same data directory. Keep this unauthenticated development
@@ -54,6 +56,46 @@ server on a trusted local network; loopback is the default.
 SQLite storage uses a different on-disk format from the former OCI layout
 default. Start with a fresh `-data` directory; the server rejects directories
 containing a layout `index.json` rather than silently opening an empty database.
+
+### Enable authentication
+
+Set one access key and secret, then start without `-dev`:
+
+```sh
+export ESSTHREE_ACCESS_KEY_ID=local-test
+export ESSTHREE_SECRET_ACCESS_KEY='replace-with-your-local-secret'
+go run . -data ./data
+```
+
+Configure your S3 client with those credentials and the same signing region.
+For curl versions supporting `--aws-sigv4`, create a bucket with:
+
+```sh
+curl --fail --aws-sigv4 'aws:amz:us-east-1:s3' \
+  --user "$ESSTHREE_ACCESS_KEY_ID:$ESSTHREE_SECRET_ACCESS_KEY" \
+  -X PUT http://127.0.0.1:9000/example-bucket
+```
+
+Startup fails if credentials are missing or if credentials are combined with
+`-dev`. The secret is read from the environment, never from a command-line flag
+or written to server logs. This is one local owner with access to all buckets;
+there are no IAM policies, accounts, or per-bucket permissions.
+
+The middleware checks header-based SigV4 signatures, signing scope, signed S3
+headers, and timestamps within 15 minutes of server time. It preserves object
+paths without cleaning repeated slashes or `..`. Signed payloads are hashed and
+verified before routing or storage changes. Bodies up to 1 MiB stay in memory;
+larger bodies are spooled to a temporary file and removed when the request ends.
+This adds temporary disk usage and an extra read/write pass for large signed
+uploads. The default authentication body limit is 5 GiB.
+
+`UNSIGNED-PAYLOAD` is accepted by default, as allowed by
+[S3 SigV4](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sig-v4-header-based-auth.html).
+It authenticates the request without checking its body hash. Use
+`-require-signed-payload` to require body integrity. Presigned URLs, temporary
+session credentials, SigV2/SigV4a, and signed chunked payloads are unsupported.
+Use HTTPS through a reverse proxy when credentials or object data need transport
+protection, and preserve the original signed host, path, query, and headers.
 
 ### Run with Docker
 
@@ -67,6 +109,15 @@ docker run --rm -p 127.0.0.1:9000:9000 -v essthree-data:/data essthree
 The named volume keeps the SQLite database and blobs when the container stops. The same curl commands work
 against the published port. The runtime image contains only the binary; SDK and
 CLI test tools stay in separate test images.
+
+The image defaults to `-dev`. To enable auth, pass credentials and replace its
+default arguments:
+
+```sh
+docker run --rm -p 127.0.0.1:9000:9000 -v essthree-data:/data \
+  -e ESSTHREE_ACCESS_KEY_ID -e ESSTHREE_SECRET_ACCESS_KEY \
+  essthree -listen 0.0.0.0:9000 -data /data
+```
 
 To build both `linux/amd64` and `linux/arm64`, install
 [Task](https://taskfile.dev/) and run:
@@ -93,8 +144,8 @@ Configure the client with:
 - Endpoint: `http://127.0.0.1:9000`.
 - Path-style addressing: enabled (`/bucket/key`).
 - Region: `us-east-1`.
-- Credentials: dummy values if your client requires them; development mode does
-  not verify them.
+- Credentials: the configured key and secret in authenticated mode; dummy values
+  in development mode, which does not verify them.
 - Request checksum calculation and response checksum validation: `when_required`.
   Default optional checksums and S3 streaming body formats are still being implemented.
 
@@ -180,7 +231,8 @@ other compatible `oci.Registry` implementations into the handler.
 | Content-MD5 and `x-amz-content-sha256` | Supported | The server validates supplied MD5 or ordinary SHA-256 payload hashes. |
 | ListMultipartUploads | Supported | Active uploads ordered by key and initiation time, with prefix, delimiter, encoding-type=url, and key/upload-ID marker pagination. Pages are capped at 1,000 entries. |
 | UploadPartCopy, ranged GET | Not yet supported | Copy parts and byte ranges remain future work. |
-| SigV4 verification and presigned URLs | Not yet supported | Development mode accepts requests without authenticating them. |
+| Header SigV4 verification | Supported | One configured key pair; signed payload verification, configurable region, clock skew, and body limit. `UNSIGNED-PAYLOAD` is configurable. |
+| Presigned URLs and session credentials | Not yet supported | Query authentication and temporary security tokens are rejected in authenticated mode. |
 | AWS chunked payloads and checksum trailers | Not yet supported | Requests using `aws-chunked` payloads or trailers are rejected. |
 
 ## Multipart recovery and limits
@@ -213,8 +265,34 @@ The root module requires `github.com/ohseeeye/oci` v0.0.5 and the separate
 pure-Go driver, so the standalone binary does not require CGo. The `s3` handler
 accepts any compatible `oci.Registry`; callers choose and close their own backend.
 
-Pass an `oci.Registry` directly to `s3.NewHandler` with
-`s3.Options{DevelopmentMode: true}`. The handler constructs the OCI-backed storage
+Pass an `oci.Registry` directly to `s3.NewHandler` with authentication middleware:
+
+```go
+auth, err := s3.NewAuthMiddleware(s3.AuthOptions{
+    AccessKeyID:     "local-test",
+    SecretAccessKey: secret,
+    Region:         "us-east-1",
+    // RequireSignedPayload: true,
+    // MaxClockSkew: 5 * time.Minute,
+    // MaxBodySize: 64 << 20,
+    // TempDir: "/path/to/temporary/storage",
+})
+if err != nil {
+    return err
+}
+handler, err := s3.NewHandler(registry, s3.Options{Authentication: auth})
+```
+
+`NewAuthMiddleware` returns a reusable `func(http.Handler) http.Handler` wrapper
+and can also protect other HTTP handlers. `Options.Authentication` accepts custom
+authentication middleware, whose responsibility is to reject unauthorized
+requests before calling the next handler. Run authentication before middleware
+that transforms the URL, headers, or body. Each authenticated request uses the
+existing `local` storage scope; credentials do not select tenants.
+
+For unauthenticated tests, use `s3.Options{DevelopmentMode: true}` instead.
+Construction requires exactly one of authentication or development mode.
+The handler constructs the OCI-backed storage
 internally and works with `http.Server` or `httptest.NewServer`. The caller owns
 storage lifetime. The standalone CLI holds a directory lock and closes SQLite
 after HTTP shutdown. Bucket catalog and multipart state still use process-local
@@ -232,7 +310,11 @@ tests with the race detector. Both cover the root and integration modules,
 matching the CI checks.
 
 AWS SDK dependencies live in the separate `integration` module.
-Tests cover recursive count/byte splits, merging, sorted seek pagination, conditional-write conflicts, version history and SDK key/version pagination, restart and completion recovery, and OCI client/server interoperability. CLI execution is explicitly opt-in.
+Tests cover AWS signature fixtures, tampered and expired requests, payload verification
+and temporary-file cleanup, authenticated SDK round trips and multipart workflows,
+recursive count/byte splits, merging, sorted seek pagination, conditional-write
+conflicts, version history and SDK key/version pagination, restart and completion
+recovery, and OCI client/server interoperability. CLI execution is explicitly opt-in.
 
 ## CI and container releases
 

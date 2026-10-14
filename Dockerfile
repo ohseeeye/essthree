@@ -7,9 +7,11 @@ COPY main.go ./main.go
 ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /essthree .
+RUN mkdir -m 1777 /runtime-tmp
 
 FROM scratch
 COPY --from=build /essthree /essthree
+COPY --from=build --chmod=1777 /runtime-tmp/ /tmp/
 EXPOSE 9000
 VOLUME /data
 ENTRYPOINT ["/essthree"]

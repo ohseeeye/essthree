@@ -27,9 +27,12 @@ func run() (runErr error) {
 	addr := flag.String("listen", "127.0.0.1:9000", "HTTP listen address")
 	dir := flag.String("data", "./data", "SQLite metadata and blob storage directory")
 	dev := flag.Bool("dev", false, "explicitly disable authentication (local testing only)")
+	region := flag.String("region", "us-east-1", "SigV4 signing region")
+	requireSigned := flag.Bool("require-signed-payload", false, "reject authenticated requests using UNSIGNED-PAYLOAD")
 	flag.Parse()
-	if !*dev {
-		return errors.New("pass -dev for this prototype; verified authentication is not implemented")
+	auth, err := configuredAuth(*dev, *region, *requireSigned)
+	if err != nil {
+		return err
 	}
 	if err := os.MkdirAll(*dir, 0700); err != nil {
 		return err
@@ -53,7 +56,7 @@ func run() (runErr error) {
 		return err
 	}
 	defer func() { runErr = errors.Join(runErr, registry.Close()) }()
-	handler, err := s3.NewHandler(registry, s3.Options{DevelopmentMode: true, Logger: slog.Default()})
+	handler, err := s3.NewHandler(registry, s3.Options{DevelopmentMode: *dev, Authentication: auth, Logger: slog.Default()})
 	if err != nil {
 		return err
 	}
@@ -62,7 +65,11 @@ func run() (runErr error) {
 	defer stop()
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
-	slog.Info("starting development S3 server", "address", *addr, "data", *dir, "authentication", "disabled", "backend", "ocisqlite")
+	authMode := "sigv4"
+	if *dev {
+		authMode = "disabled"
+	}
+	slog.Info("starting S3 server", "address", *addr, "data", *dir, "authentication", authMode, "backend", "ocisqlite")
 	select {
 	case err := <-done:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -78,4 +85,18 @@ func run() (runErr error) {
 		return err
 	}
 	return nil
+}
+
+func configuredAuth(dev bool, region string, requireSigned bool) (s3.Middleware, error) {
+	accessKey, secret := os.Getenv("ESSTHREE_ACCESS_KEY_ID"), os.Getenv("ESSTHREE_SECRET_ACCESS_KEY")
+	if dev {
+		if accessKey != "" || secret != "" || requireSigned {
+			return nil, errors.New("-dev cannot be combined with credentials or -require-signed-payload")
+		}
+		return nil, nil
+	}
+	if accessKey == "" || secret == "" {
+		return nil, errors.New("set ESSTHREE_ACCESS_KEY_ID and ESSTHREE_SECRET_ACCESS_KEY, or pass -dev to disable authentication")
+	}
+	return s3.NewAuthMiddleware(s3.AuthOptions{AccessKeyID: accessKey, SecretAccessKey: secret, Region: region, RequireSignedPayload: requireSigned})
 }

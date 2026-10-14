@@ -26,7 +26,11 @@ func server(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	h, err := s3.NewHandler(r, s3.Options{DevelopmentMode: true})
+	auth, err := s3.NewAuthMiddleware(s3.AuthOptions{AccessKeyID: "test", SecretAccessKey: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := s3.NewHandler(r, s3.Options{Authentication: auth})
 	if err != nil {
 		t.Fatal(err)
 	}
