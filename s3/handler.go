@@ -24,20 +24,24 @@ const xmlns = "http://s3.amazonaws.com/doc/2006-03-01/"
 type Options struct {
 	// DevelopmentMode explicitly accepts requests without verifying credentials.
 	DevelopmentMode bool
-	Logger          *slog.Logger
-	MaxObjectSize   int64 // defaults to 5 GiB for this single-PUT prototype
+	// Authentication wraps the protocol handler before routing or storage access.
+	// Required unless DevelopmentMode is enabled. Use NewAuthMiddleware for SigV4.
+	Authentication Middleware
+	Logger         *slog.Logger
+	MaxObjectSize  int64 // defaults to 5 GiB for this single-PUT prototype
 }
 type Handler struct {
 	store Backend
 	opts  Options
+	serve http.Handler
 }
 
 func NewHandler(registry oci.Registry, opts Options) (*Handler, error) {
 	if registry == nil {
 		return nil, errors.New("nil OCI registry")
 	}
-	if !opts.DevelopmentMode {
-		return nil, errors.New("SigV4 verification is not implemented; explicitly enable development mode")
+	if opts.DevelopmentMode == (opts.Authentication != nil) {
+		return nil, errors.New("configure authentication middleware or explicitly enable development mode, but not both")
 	}
 	if opts.MaxObjectSize == 0 {
 		opts.MaxObjectSize = 5 << 30
@@ -49,7 +53,14 @@ func NewHandler(registry oci.Registry, opts Options) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{store: store, opts: opts}, nil
+	h := &Handler{store: store, opts: opts}
+	if opts.Authentication != nil {
+		h.serve = opts.Authentication(http.HandlerFunc(h.serveHTTP))
+		if h.serve == nil {
+			return nil, errors.New("authentication middleware returned a nil handler")
+		}
+	}
+	return h, nil
 }
 
 var bucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
@@ -58,6 +69,9 @@ func validBucket(s string) bool {
 	return bucketPattern.MatchString(s) && !strings.Contains(s, "..") && !strings.Contains(s, ".-") && !strings.Contains(s, "-.") && net.ParseIP(s) == nil
 }
 func (h *Handler) fail(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	writeS3Error(w, r, status, code, message)
+}
+func writeS3Error(w http.ResponseWriter, r *http.Request, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(status)
 	if r.Method == http.MethodHead {
@@ -107,6 +121,13 @@ func writeXML(w http.ResponseWriter, v any) {
 }
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("x-amz-request-id", rand.Text())
+	if h.serve != nil {
+		h.serve.ServeHTTP(w, r)
+		return
+	}
+	h.serveHTTP(w, r)
+}
+func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	scope := Scope{Tenant: "local"}
 	// URL.Path is already decoded once by net/http. Never clean or redirect it.
 	if !strings.HasPrefix(r.URL.Path, "/") {
