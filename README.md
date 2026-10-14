@@ -331,8 +331,7 @@ Releases publish to `ohseeeye/essthree` on Docker Hub. Configure these under
 | Repository secret | `DOCKERHUB_USERNAME` | Docker Hub login name. |
 | Repository secret | `DOCKERHUB_TOKEN` | Docker Hub access token with push access to that repository. |
 
-Successful releases publish `ohseeeye/essthree:latest` and
-`ohseeeye/essthree:sha-<full Git commit SHA>` tags. PR checks do not
+Successful releases publish only the `ohseeeye/essthree:latest` tag. PR checks do not
 use Docker Hub credentials. After configuring credentials, you can also run
 **Release** manually from the Actions tab with `main` selected. The release workflow uses Docker's
 [Buildx action](https://github.com/docker/setup-buildx-action) on its temporary
