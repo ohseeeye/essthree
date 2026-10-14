@@ -68,6 +68,24 @@ The named volume keeps the SQLite database and blobs when the container stops. T
 against the published port. The runtime image contains only the binary; SDK and
 CLI test tools stay in separate test images.
 
+To build both `linux/amd64` and `linux/arm64`, install
+[Task](https://taskfile.dev/) and run:
+
+```sh
+task docker:build
+```
+
+This uses the currently selected Docker Buildx builder and
+writes both architectures to `dist/essthree.oci.tar`. Set `IMAGE` to choose the
+image tag and `OUTPUT` to choose a Buildx exporter. For example, to build and
+push both architectures to a registry you control:
+
+```sh
+task docker:build IMAGE=ghcr.io/your-account/essthree:latest OUTPUT=type=registry
+```
+
+Registry output requires signing in to that registry first.
+
 ### Connect an S3 client
 
 Configure the client with:
@@ -205,12 +223,42 @@ coordination, so only one server should own a data directory.
 ## Tests
 
 ```sh
-go test -race ./...
-(cd integration && go test -race ./...)
+task lint
+task test
 ```
+
+`task lint` checks Go formatting and runs `go vet`. `task test` runs uncached
+tests with the race detector. Both cover the root and integration modules,
+matching the CI checks.
 
 AWS SDK dependencies live in the separate `integration` module.
 Tests cover recursive count/byte splits, merging, sorted seek pagination, conditional-write conflicts, version history and SDK key/version pagination, restart and completion recovery, and OCI client/server interoperability. CLI execution is explicitly opt-in.
+
+## CI and container releases
+
+GitHub Actions checks formatting with `gofmt`, runs `go vet`, and runs race tests
+for both the root and integration modules on pull requests. Pushes to `main`,
+including merged PRs, rerun those checks before publishing the Dockerfile as a
+multiarchitecture image for `linux/amd64` and `linux/arm64`.
+
+Configure these under **Settings → Secrets and variables → Actions**:
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Repository variable | `DOCKERHUB_IMAGE` | Docker Hub repository without a tag, such as `your-account/essthree`. |
+| Repository secret | `DOCKERHUB_USERNAME` | Docker Hub login name. |
+| Repository secret | `DOCKERHUB_TOKEN` | Docker Hub access token with push access to that repository. |
+
+Publishing is skipped until `DOCKERHUB_IMAGE` is set. Once configured, successful
+releases publish `latest` and `sha-<full Git commit SHA>` tags. PR checks do not
+use Docker Hub credentials. After configuring credentials, you can also run
+**Release** manually from the Actions tab with `main` selected. The release workflow uses Docker's
+[Buildx action](https://github.com/docker/setup-buildx-action) on its temporary
+GitHub runner; local `task docker:build` uses your selected builder.
+
+To require checks before merging, configure a branch rule for `main` that requires
+`Lint`, `Test (.)`, and `Test (integration)`. Workflow files alone do not enforce
+branch protection.
 
 Run all current Go tests in a disposable container, without installing Go SDK or
 CLI test dependencies on the host:

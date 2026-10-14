@@ -1,0 +1,37 @@
+version: "3"
+
+tasks:
+  lint:
+    desc: Check Go formatting and vet both modules
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - |
+        files=$(gofmt -l .)
+        if [ -n "$files" ]; then
+          printf 'Run gofmt on:\n%s\n' "$files"
+          exit 1
+        fi
+      - go vet ./...
+      - go -C integration vet ./...
+
+  test:
+    desc: Run uncached race tests for both modules
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - go test -race -count=1 ./...
+      - go -C integration test -race -count=1 ./...
+
+  docker:build:
+    desc: Build Linux amd64 and arm64 images as an OCI archive
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      IMAGE: '{{.IMAGE | default "essthree:latest"}}'
+      OUTPUT: '{{.OUTPUT | default "type=oci,dest=dist/essthree.oci.tar"}}'
+    cmds:
+      - mkdir -p dist
+      - >-
+        docker buildx build
+        --platform linux/amd64,linux/arm64
+        --tag {{.IMAGE | shellQuote}}
+        --output {{.OUTPUT | shellQuote}}
+        .
